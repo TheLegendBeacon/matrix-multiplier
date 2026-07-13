@@ -10,6 +10,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native")
 
 add_library(matrix_engine
     src/matrix.cpp
+include/matrix.hpp
 )
 
 target_include_directories(matrix_engine PUBLIC include)
