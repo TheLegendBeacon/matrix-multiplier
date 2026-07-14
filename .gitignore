@@ -1,4 +1,6 @@
 .clangd
 
-./build
-./build/*
+build
+build/*
+
+tests/tests*.txt

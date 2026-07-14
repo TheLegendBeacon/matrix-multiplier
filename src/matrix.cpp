@@ -1,10 +1,14 @@
 #include "matrix.hpp"
 
+#include <cstddef>
+#include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <cmath>
+#include <vector>
+#include <immintrin.h>
 
 using FileInformation = struct stat;
 
@@ -55,7 +59,7 @@ unsigned long long parse_next_uint64(unsigned long long init_number, const char*
     }
 
     if (p >= end) {
-        std::fprintf(stderr, "parse_next_float: unexpected EOF\n");
+        std::fprintf(stderr, "parse_next_uint64: unexpected EOF\n");
         std::abort();
     }
 
@@ -66,6 +70,10 @@ unsigned long long parse_next_uint64(unsigned long long init_number, const char*
 
     ptr = p;
     return number;
+}
+
+unsigned long long parse_next_uint64(const char*& ptr, const char* end) {
+    return parse_next_uint64(0, ptr, end);
 }
 
 float parse_next_float(const char*& ptr, const char* end) {
@@ -123,3 +131,161 @@ Matrix load_one_matrix(const char*& ptr, const char* end) {
     return m;
 }
 
+inline void micro_kernel3x24_unsafe(float* a_stream, float* b_stream, Matrix& c, int K, int ii, int jj, int aheight, int bwidth) {
+    __m256 c11 = _mm256_setzero_ps();
+    __m256 c12 = _mm256_setzero_ps();
+    __m256 c13 = _mm256_setzero_ps();
+    __m256 c21 = _mm256_setzero_ps();
+    __m256 c22 = _mm256_setzero_ps();
+    __m256 c23 = _mm256_setzero_ps();
+    __m256 c31 = _mm256_setzero_ps();
+    __m256 c32 = _mm256_setzero_ps();
+    __m256 c33 = _mm256_setzero_ps();
+
+    for (int k = 0; k < K; k++) {
+        __m256 b1 = _mm256_loadu_ps(b_stream);
+        __m256 b2 = _mm256_loadu_ps(b_stream + 8);
+        __m256 b3 = _mm256_loadu_ps(b_stream + 16);
+
+        __m256 a1 = _mm256_broadcast_ss(a_stream);
+        __m256 a2 = _mm256_broadcast_ss(a_stream + 1);
+        __m256 a3 = _mm256_broadcast_ss(a_stream + 2);
+
+        c11 = _mm256_fmadd_ps(a1, b1, c11);
+        c12 = _mm256_fmadd_ps(a1, b2, c12);
+        c13 = _mm256_fmadd_ps(a1, b3, c13);
+
+        c21 = _mm256_fmadd_ps(a2, b1, c21);
+        c22 = _mm256_fmadd_ps(a2, b2, c22);
+        c23 = _mm256_fmadd_ps(a2, b3, c23);
+
+        c31 = _mm256_fmadd_ps(a3, b1, c31);
+        c32 = _mm256_fmadd_ps(a3, b2, c32);
+        c33 = _mm256_fmadd_ps(a3, b3, c33);
+
+        a_stream += aheight;
+        b_stream += bwidth;
+    }
+
+    _mm256_storeu_ps(c.data.data()+(ii*c.columns)+jj,c11);
+    _mm256_storeu_ps(c.data.data()+((ii+1)*c.columns)+jj,c21);
+    _mm256_storeu_ps(c.data.data()+((ii+2)*c.columns)+jj,c31);
+
+    _mm256_storeu_ps(c.data.data()+(ii*c.columns)+(jj+8),c12);
+    _mm256_storeu_ps(c.data.data()+((ii+1)*c.columns)+(jj+8),c22);
+    _mm256_storeu_ps(c.data.data()+((ii+2)*c.columns)+(jj+8),c32);
+
+    _mm256_storeu_ps(c.data.data()+(ii*c.columns)+(jj+16), c13);
+    _mm256_storeu_ps(c.data.data()+((ii+1)*c.columns)+(jj+16),c23);
+    _mm256_storeu_ps(c.data.data()+((ii+2)*c.columns)+(jj+16), c33);
+}
+
+inline void micro_kernel3x24_safe(float* a_stream, float* b_stream, Matrix& c, int K, int ii, int jj, int aheight, int bwidth) {
+    alignas(32) float temp[72];
+
+    __m256 c11 = _mm256_setzero_ps();
+    __m256 c12 = _mm256_setzero_ps();
+    __m256 c13 = _mm256_setzero_ps();
+    __m256 c21 = _mm256_setzero_ps();
+    __m256 c22 = _mm256_setzero_ps();
+    __m256 c23 = _mm256_setzero_ps();
+    __m256 c31 = _mm256_setzero_ps();
+    __m256 c32 = _mm256_setzero_ps();
+    __m256 c33 = _mm256_setzero_ps();
+
+    for (int k = 0; k < K; k++) {
+        __m256 b1 = _mm256_loadu_ps(b_stream);
+        __m256 b2 = _mm256_loadu_ps(b_stream + 8);
+        __m256 b3 = _mm256_loadu_ps(b_stream + 16);
+
+        __m256 a1 = _mm256_broadcast_ss(a_stream);
+        __m256 a2 = _mm256_broadcast_ss(a_stream + 1);
+        __m256 a3 = _mm256_broadcast_ss(a_stream + 2);
+
+        c11 = _mm256_fmadd_ps(a1, b1, c11);
+        c12 = _mm256_fmadd_ps(a1, b2, c12);
+        c13 = _mm256_fmadd_ps(a1, b3, c13);
+
+        c21 = _mm256_fmadd_ps(a2, b1, c21);
+        c22 = _mm256_fmadd_ps(a2, b2, c22);
+        c23 = _mm256_fmadd_ps(a2, b3, c23);
+
+        c31 = _mm256_fmadd_ps(a3, b1, c31);
+        c32 = _mm256_fmadd_ps(a3, b2, c32);
+        c33 = _mm256_fmadd_ps(a3, b3, c33);
+
+        a_stream += aheight;
+        b_stream += bwidth;
+    }
+
+    _mm256_store_ps(temp, c11);
+    _mm256_store_ps(temp + 8, c12);
+    _mm256_store_ps(temp + 16, c13);
+    _mm256_store_ps(temp + 24, c21);
+    _mm256_store_ps(temp + 32, c22);
+    _mm256_store_ps(temp + 40, c23);
+    _mm256_store_ps(temp + 48, c31);
+    _mm256_store_ps(temp + 56, c32);
+    _mm256_store_ps(temp + 64, c33);
+
+    int valid_rows = std::min(3, c.rows - ii);
+    int valid_cols = std::min(24, c.columns - jj);
+
+    for (int i = 0; i < valid_rows; i++) {
+        for (int j = 0; j < valid_cols; j++) {
+            c.data[(ii + i) * c.columns + (jj + j)] = temp[i * 24 + j];        
+        }
+    }
+}
+
+Matrix multiply(Matrix a, Matrix b) {
+    Matrix c(a.rows, b.columns);
+
+    std::vector<float> a_padded(pad_height(a.rows, 3)*a.columns, 0.0f);
+    int aheight = pad_height(a.rows, 3);
+    for (int i = 0; i < a.rows; i++) {
+        for (int j = 0; j < a.columns; j++) {
+            a_padded[j*aheight+i] = a.data[i*a.columns+j];
+        }
+    }
+
+    int bwidth = pad_width(b.columns, 24);
+    std::vector<float> b_padded(b.rows*bwidth, 0.0f);
+    for (int i = 0; i < b.rows; i++) {
+        float* b_row = b.data.data() + (size_t)i * b.columns;
+        float* b_padded_row = b_padded.data() + (size_t)i * bwidth;
+        memcpy(b_padded_row, b_row, b.columns*sizeof(float));
+    }
+
+    int safe_rows = c.rows - (c.rows % 3);
+    int safe_columns = c.columns - (c.columns % 24);
+
+    for (int jj = 0; jj < safe_columns; jj += 24) {
+        for (int ii = 0; ii < safe_rows; ii += 3) {
+            micro_kernel3x24_unsafe(&a_padded[ii], &b_padded[jj], c, a.columns, ii, jj, aheight, bwidth);
+        }
+    }
+
+    for (int jj = safe_columns; jj < c.columns; jj += 24) {
+        for (int ii = 0; ii < safe_rows; ii += 3) {
+            micro_kernel3x24_safe(&a_padded[ii], &b_padded[jj], c, a.columns, ii, jj, aheight, bwidth);
+        }
+    }
+
+    for (int jj = 0; jj < c.columns; jj += 24) {
+        for (int ii = safe_rows; ii < c.rows; ii += 3) {
+            micro_kernel3x24_safe(&a_padded[ii], &b_padded[jj], c, a.columns, ii, jj, aheight, bwidth);
+        }
+    }
+
+    return c;
+}
+
+// Naive 3-Deep Loop
+// for (int i = 0; i < a.rows; i++) {
+//     for (int k = 0; k < a.columns; k++) {
+//         for (int j = 0; j < b.columns; j++){
+//             c.data[i*c.columns+j] += a.data[i*a.columns+k]*b.data[k*b.columns+j];
+//         }
+//     }
+// }

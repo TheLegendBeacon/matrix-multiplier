@@ -1,4 +1,5 @@
 #include "matrix.hpp"
+#include <chrono>
 #include <cstddef>
 #include <iostream>
 #include <string>
@@ -6,6 +7,7 @@
 int main(int argc, char* argv[]) {
     if (argc == 1) {
         std::cout << "Usage: ./matrix_app <path-to-file>" << std::endl;
+        return 1;
     }
     std::string path = argv[1];
 
@@ -19,15 +21,21 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    Matrix matrix = load_one_matrix(fileptr, fileptr+file_size);
+    Matrix matrix1 = load_one_matrix(fileptr, start+file_size);
+    Matrix matrix2 = load_one_matrix(fileptr, start+file_size);
     unload_file(start, file_size);
 
-    std::cout << matrix.rows << ' ' << matrix.columns << std::endl;
-    long long counter = 0;
-    for (auto k: matrix.data) {
-        std::cout << k << ' ';
-        counter++;
-        if (counter % matrix.rows == 0) std::cout << std::endl;
-    } 
+    auto t0 = std::chrono::steady_clock::now();
+    Matrix result = multiply(matrix1, matrix2);
+    auto t1 = std::chrono::steady_clock::now();
+
+    auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+    std::cout << "multiply took " << elapsed_us << " us\n";
+    
+    double total_operations = 2.0 * result.rows * matrix1.columns * result.columns;
+    double gflops = total_operations / std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count();
+    std::cout << "GFLOPS: " << gflops << std::endl;
+    // std::cout << result;
+
     return 0;
 }
