@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstring>
 #include <fcntl.h>
+#include <mm_malloc.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -131,7 +132,7 @@ Matrix load_one_matrix(const char*& ptr, const char* end) {
     return m;
 }
 
-inline void micro_kernel3x24_unsafe(float* a_stream, float* b_stream, Matrix& c, int K, int ii, int jj, int aheight, int bwidth) {
+inline void micro_kernel3x24_unsafe(float* a_stream, float* b_stream, Matrix& c, int K, int ii, int jj) {
     __m256 c11 = _mm256_setzero_ps();
     __m256 c12 = _mm256_setzero_ps();
     __m256 c13 = _mm256_setzero_ps();
@@ -142,6 +143,7 @@ inline void micro_kernel3x24_unsafe(float* a_stream, float* b_stream, Matrix& c,
     __m256 c32 = _mm256_setzero_ps();
     __m256 c33 = _mm256_setzero_ps();
 
+    #pragma GCC unroll 4
     for (int k = 0; k < K; k++) {
         __m256 b1 = _mm256_loadu_ps(b_stream);
         __m256 b2 = _mm256_loadu_ps(b_stream + 8);
@@ -163,8 +165,8 @@ inline void micro_kernel3x24_unsafe(float* a_stream, float* b_stream, Matrix& c,
         c32 = _mm256_fmadd_ps(a3, b2, c32);
         c33 = _mm256_fmadd_ps(a3, b3, c33);
 
-        a_stream += aheight;
-        b_stream += bwidth;
+        a_stream += 3;
+        b_stream += 24;
     }
 
     _mm256_storeu_ps(c.data.data()+(ii*c.columns)+jj,c11);
@@ -180,7 +182,7 @@ inline void micro_kernel3x24_unsafe(float* a_stream, float* b_stream, Matrix& c,
     _mm256_storeu_ps(c.data.data()+((ii+2)*c.columns)+(jj+16), c33);
 }
 
-inline void micro_kernel3x24_safe(float* a_stream, float* b_stream, Matrix& c, int K, int ii, int jj, int aheight, int bwidth) {
+inline void micro_kernel3x24_safe(float* a_stream, float* b_stream, Matrix& c, int K, int ii, int jj) {
     alignas(32) float temp[72];
 
     __m256 c11 = _mm256_setzero_ps();
@@ -193,6 +195,7 @@ inline void micro_kernel3x24_safe(float* a_stream, float* b_stream, Matrix& c, i
     __m256 c32 = _mm256_setzero_ps();
     __m256 c33 = _mm256_setzero_ps();
 
+    #pragma gcc unroll 4
     for (int k = 0; k < K; k++) {
         __m256 b1 = _mm256_loadu_ps(b_stream);
         __m256 b2 = _mm256_loadu_ps(b_stream + 8);
@@ -214,8 +217,8 @@ inline void micro_kernel3x24_safe(float* a_stream, float* b_stream, Matrix& c, i
         c32 = _mm256_fmadd_ps(a3, b2, c32);
         c33 = _mm256_fmadd_ps(a3, b3, c33);
 
-        a_stream += aheight;
-        b_stream += bwidth;
+        a_stream += 3;
+        b_stream += 24;
     }
 
     _mm256_store_ps(temp, c11);
@@ -241,20 +244,22 @@ inline void micro_kernel3x24_safe(float* a_stream, float* b_stream, Matrix& c, i
 Matrix multiply(Matrix a, Matrix b) {
     Matrix c(a.rows, b.columns);
 
-    std::vector<float> a_padded(pad_height(a.rows, 3)*a.columns, 0.0f);
+    std::vector<float> a_packed(pad_height(a.rows, 3)*a.columns, 0.0f);
     int aheight = pad_height(a.rows, 3);
     for (int i = 0; i < a.rows; i++) {
         for (int j = 0; j < a.columns; j++) {
-            a_padded[j*aheight+i] = a.data[i*a.columns+j];
+            int index = (i/3)*3*a.columns + 3*j + (i % 3);
+            a_packed[index] = a.data[i*a.columns+j];
         }
     }
 
     int bwidth = pad_width(b.columns, 24);
-    std::vector<float> b_padded(b.rows*bwidth, 0.0f);
+    std::vector<float> b_packed(b.rows*bwidth, 0.0f);
     for (int i = 0; i < b.rows; i++) {
-        float* b_row = b.data.data() + (size_t)i * b.columns;
-        float* b_padded_row = b_padded.data() + (size_t)i * bwidth;
-        memcpy(b_padded_row, b_row, b.columns*sizeof(float));
+        for (int j = 0; j < b.columns; j++) {
+            int index = (j / 24) * b.rows * 24 + (24 * i) + (j % 24);
+            b_packed[index] = b.data[i*b.columns+j];
+        }
     }
 
     int safe_rows = c.rows - (c.rows % 3);
@@ -262,30 +267,21 @@ Matrix multiply(Matrix a, Matrix b) {
 
     for (int jj = 0; jj < safe_columns; jj += 24) {
         for (int ii = 0; ii < safe_rows; ii += 3) {
-            micro_kernel3x24_unsafe(&a_padded[ii], &b_padded[jj], c, a.columns, ii, jj, aheight, bwidth);
+            micro_kernel3x24_unsafe(&a_packed[ii], b_packed.data()+jj, c, a.columns, ii, jj);
         }
     }
 
     for (int jj = safe_columns; jj < c.columns; jj += 24) {
         for (int ii = 0; ii < safe_rows; ii += 3) {
-            micro_kernel3x24_safe(&a_padded[ii], &b_padded[jj], c, a.columns, ii, jj, aheight, bwidth);
+            micro_kernel3x24_safe(&a_packed[ii], b_packed.data()+jj, c, a.columns, ii, jj);
         }
     }
 
     for (int jj = 0; jj < c.columns; jj += 24) {
         for (int ii = safe_rows; ii < c.rows; ii += 3) {
-            micro_kernel3x24_safe(&a_padded[ii], &b_padded[jj], c, a.columns, ii, jj, aheight, bwidth);
+            micro_kernel3x24_safe(&a_packed[ii], b_packed.data()+jj, c, a.columns, ii, jj);
         }
     }
 
     return c;
 }
-
-// Naive 3-Deep Loop
-// for (int i = 0; i < a.rows; i++) {
-//     for (int k = 0; k < a.columns; k++) {
-//         for (int j = 0; j < b.columns; j++){
-//             c.data[i*c.columns+j] += a.data[i*a.columns+k]*b.data[k*b.columns+j];
-//         }
-//     }
-// }
